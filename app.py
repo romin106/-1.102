@@ -78,7 +78,7 @@ if search_query:
         try:
             # 무료 전용 모델 gemini-2.5-flash 사용
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-1.5-flash',
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json"
