@@ -76,7 +76,7 @@ if search_query:
         neutral_news = []
 
         try:
-            # 무료 전용 모델 gemini-2.5-flash 사용
+            # 무료 전용 모델 gemini-3.6-flash 사용
             response = client.models.generate_content(
                 model='gemini-3.6-flash',
                 contents=prompt,
