@@ -4,12 +4,15 @@ import xml.etree.ElementTree as ET
 from urllib.parse import quote
 import json
 import re
+import time
 import pandas as pd
 import yfinance as yf
 from google import genai
 from google.genai import types
 
-MODEL_NAME = "gemini-3.6-flash"  # 사용 가능한 모델명으로 필요 시 변경
+# 앞에서부터 순서대로 시도하고, 실패하면 다음 모델로 넘어감 (사용 가능한 모델명으로 변경 가능)
+MODEL_CANDIDATES = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+RETRIES_PER_MODEL = 2  # 모델당 시도 횟수
 NEWS_COUNT = 15
 
 st.set_page_config(page_title="기업 주가 전망 AI", layout="wide")
@@ -27,6 +30,26 @@ else:
 def parse_json(text: str):
     text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
     return json.loads(text)
+
+
+def generate_json(prompt: str):
+    """모델 후보를 순서대로 시도(모델당 재시도 포함). (결과, 사용한 모델명) 반환."""
+    last_error = None
+    for model in MODEL_CANDIDATES:
+        for attempt in range(RETRIES_PER_MODEL):
+            try:
+                res = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json"),
+                )
+                return parse_json(res.text), model
+            except Exception as e:
+                last_error = e
+                if attempt < RETRIES_PER_MODEL - 1:
+                    time.sleep(2 * (attempt + 1))  # 2초 대기 후 재시도
+        # 이 모델이 계속 실패하면 다음 모델로 넘어감
+    raise RuntimeError(f"모든 모델 호출에 실패했습니다. 마지막 오류: {last_error}")
 
 
 # ---------- 뉴스 수집 ----------
@@ -61,16 +84,8 @@ def resolve_ticker(company: str):
 - 비상장이거나 기업이 아니거나 확실하지 않으면 ticker를 null로 하세요. 추측하지 마세요.
 설명 없이 JSON으로만 응답: {{"ticker": "005930.KS", "name": "삼성전자"}}
 """
-    try:
-        res = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-        data = parse_json(res.text)
-        return data.get("ticker"), data.get("name")
-    except Exception:
-        return None, None
+    data, _ = generate_json(prompt)  # 실패 시 예외 발생 -> 실패 결과는 캐시되지 않음
+    return data.get("ticker"), data.get("name")
 
 
 # ---------- 주가 데이터 + 지표 ----------
@@ -174,12 +189,9 @@ def analyze(company: str, titles: tuple, price_text: str):
   "down_factors": ["하락 요인1"]
 }}
 """
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    return parse_json(response.text)
+    result, used_model = generate_json(prompt)
+    result["_model"] = used_model
+    return result
 
 
 # ---------- UI ----------
@@ -200,7 +212,13 @@ if search_query:
             st.stop()
 
         # 티커 확정 -> 주가 조회
-        ticker, ticker_name = (manual_ticker.strip(), None) if manual_ticker.strip() else resolve_ticker(search_query)
+        if manual_ticker.strip():
+            ticker = manual_ticker.strip()
+        else:
+            try:
+                ticker, _ = resolve_ticker(search_query)
+            except Exception:
+                ticker = None  # 티커 조회 실패 시 뉴스만으로 분석 진행
         ind, used_ticker = None, None
         if ticker:
             used_ticker, price_df = fetch_price(ticker)
@@ -241,6 +259,7 @@ if search_query:
     box = {"상승": st.success, "하락": st.error}.get(outlook, st.info)
     box(f"## {icon} AI 종합 전망: **{outlook}**  (확신도 {confidence}%)")
     st.write(result.get("summary", ""))
+    st.caption(f"분석에 사용된 AI 모델: {result.get('_model', '알 수 없음')}")
 
     # ---------- 실제 주가 ----------
     if ind:
