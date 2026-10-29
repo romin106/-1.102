@@ -10,8 +10,9 @@ import yfinance as yf
 from google import genai
 from google.genai import types
 
-# 앞에서부터 순서대로 시도하고, 실패하면 다음 모델로 넘어감 (사용 가능한 모델명으로 변경 가능)
-MODEL_CANDIDATES = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+# 먼저 시도할 선호 모델 (내 API 키로 쓸 수 있는 것만 실제로 사용됨)
+PREFERRED_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+MAX_MODELS = 6  # 최대 시도할 모델 수
 RETRIES_PER_MODEL = 2  # 모델당 시도 횟수
 NEWS_COUNT = 15
 
@@ -32,10 +33,35 @@ def parse_json(text: str):
     return json.loads(text)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_model_candidates():
+    """내 API 키로 쓸 수 있는 flash 계열 모델을 조회해 시도 순서를 만든다."""
+    skip_words = ("image", "tts", "live", "audio", "embedding", "robotics", "computer")
+    found = []
+    try:
+        for m in client.models.list():
+            name = (m.name or "").replace("models/", "")
+            actions = getattr(m, "supported_actions", None) or []
+            if "flash" not in name or any(w in name for w in skip_words):
+                continue
+            if actions and "generateContent" not in actions:
+                continue
+            found.append(name)
+    except Exception:
+        pass
+
+    if not found:  # 조회 실패 시 선호 목록 그대로 사용
+        return PREFERRED_MODELS[:MAX_MODELS]
+
+    ordered = [p for p in PREFERRED_MODELS if p in found]
+    ordered += [n for n in sorted(found, reverse=True) if n not in ordered]
+    return ordered[:MAX_MODELS]
+
+
 def generate_json(prompt: str):
     """모델 후보를 순서대로 시도(모델당 재시도 포함). (결과, 사용한 모델명) 반환."""
     last_error = None
-    for model in MODEL_CANDIDATES:
+    for model in get_model_candidates():
         for attempt in range(RETRIES_PER_MODEL):
             try:
                 res = client.models.generate_content(
@@ -46,9 +72,12 @@ def generate_json(prompt: str):
                 return parse_json(res.text), model
             except Exception as e:
                 last_error = e
+                msg = str(e)
+                # 없는 모델/권한 없음은 재시도해도 소용없으니 바로 다음 모델로
+                if "404" in msg or "NOT_FOUND" in msg or "PERMISSION_DENIED" in msg:
+                    break
                 if attempt < RETRIES_PER_MODEL - 1:
-                    time.sleep(2 * (attempt + 1))  # 2초 대기 후 재시도
-        # 이 모델이 계속 실패하면 다음 모델로 넘어감
+                    time.sleep(2 * (attempt + 1))  # 과부하(503) 등은 잠시 후 재시도
     raise RuntimeError(f"모든 모델 호출에 실패했습니다. 마지막 오류: {last_error}")
 
 
